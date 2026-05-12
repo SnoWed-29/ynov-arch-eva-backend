@@ -6,11 +6,16 @@ on:
       - main
       - master
 
+env:
+  # Opt-in to Node.js 24 for actions to avoid deprecation warnings
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   analyze-and-test:
     name: Backend Analysis & Unit Tests
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false # Don't cancel other services if one fails
       matrix:
         service: [api-gateway, auth-service, product-service, order-service, payment-service, notification-service]
     
@@ -23,23 +28,20 @@ jobs:
         with:
           node-version: '18'
           cache: 'npm'
-          cache-dependency-path: ${{ matrix.service }}/package-lock.json
+          # Use package.json for caching since package-lock.json is missing
+          cache-dependency-path: ${{ matrix.service }}/package.json
 
       - name: Install Dependencies
         working-directory: ${{ matrix.service }}
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
+          # Using npm install because package-lock.json is missing
+          npm install
 
-      - name: Run Jest Tests
+      - name: Run Tests
         working-directory: ${{ matrix.service }}
         run: |
-          # Producing JUnit XML report for GitHub Actions integration.
-          # Assumes 'test' script is configured for Jest.
-          npm test || echo "No tests defined for ${{ matrix.service }}"
+          # Run the health check tests we created
+          npm test
         env:
           NODE_ENV: test
           CI: true
@@ -49,6 +51,7 @@ jobs:
     needs: analyze-and-test
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         service: [api-gateway, auth-service, product-service, order-service, payment-service, notification-service]
     
@@ -63,5 +66,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./${{ matrix.service }}
-          push: false # Set to true and add registry login for real push
+          push: false
           tags: ${{ matrix.service }}:latest
+          # Enable caching for docker builds to speed up subsequent runs
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
