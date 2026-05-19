@@ -7,15 +7,16 @@ on:
       - master
 
 env:
-  # Opt-in to Node.js 24 for actions to avoid deprecation warnings
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}   # e.g. localhost:8082 or your-server-ip:8082
+  REPO_NAME: docker-local
 
 jobs:
   analyze-and-test:
     name: Backend Analysis & Unit Tests
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false # Don't cancel other services if one fails
+      fail-fast: false
       matrix:
         service: [api-gateway, auth-service, product-service, order-service, payment-service, notification-service]
     
@@ -28,20 +29,15 @@ jobs:
         with:
           node-version: '18'
           cache: 'npm'
-          # Use package.json for caching since package-lock.json is missing
           cache-dependency-path: ${{ matrix.service }}/package.json
 
       - name: Install Dependencies
         working-directory: ${{ matrix.service }}
-        run: |
-          # Using npm install because package-lock.json is missing
-          npm install
+        run: npm install
 
       - name: Run Tests
         working-directory: ${{ matrix.service }}
-        run: |
-          # Run the health check tests we created
-          npm test
+        run: npm test
         env:
           NODE_ENV: test
           CI: true
@@ -68,6 +64,60 @@ jobs:
           context: ./${{ matrix.service }}
           push: false
           tags: ${{ matrix.service }}:latest
-          # Enable caching for docker builds to speed up subsequent runs
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ============================================================
+  # ✅ NEW: Push to JFrog Artifactory — runs BEFORE deployment
+  # ============================================================
+  push-to-artifactory:
+    name: Push Images to Artifactory
+    needs: build-docker      # waits for all Docker builds to succeed first
+    runs-on: ubuntu-latest   # ⚠️ change to self-hosted if Artifactory is on localhost
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api-gateway, auth-service, product-service, order-service, payment-service, notification-service]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Rebuild the image here so this job has it available to push
+      # (GitHub Actions jobs don't share Docker images between runners)
+      - name: Rebuild Image for Push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ matrix.service }}
+          push: false
+          load: true        # loads image into the local Docker daemon so we can tag & push it
+          tags: ${{ matrix.service }}:latest
+          cache-from: type=gha   # pulls from cache so this is fast (no real rebuild)
+          cache-to: type=gha,mode=max
+
+      - name: Login to JFrog Artifactory
+        run: |
+          echo "${{ secrets.ARTIFACTORY_PASSWORD }}" | docker login ${{ env.ARTIFACTORY_URL }} \
+            -u "${{ secrets.ARTIFACTORY_USERNAME }}" \
+            --password-stdin
+
+      - name: Tag Image for Artifactory
+        run: |
+          docker tag ${{ matrix.service }}:latest \
+            ${{ env.ARTIFACTORY_URL }}/${{ env.REPO_NAME }}/${{ matrix.service }}:${{ github.run_number }}
+
+          # Also keep a :latest tag in Artifactory for easy reference
+          docker tag ${{ matrix.service }}:latest \
+            ${{ env.ARTIFACTORY_URL }}/${{ env.REPO_NAME }}/${{ matrix.service }}:latest
+
+      - name: Push to Artifactory
+        run: |
+          docker push ${{ env.ARTIFACTORY_URL }}/${{ env.REPO_NAME }}/${{ matrix.service }}:${{ github.run_number }}
+          docker push ${{ env.ARTIFACTORY_URL }}/${{ env.REPO_NAME }}/${{ matrix.service }}:latest
+
+      - name: Logout from Artifactory
+        if: always()   # logout even if push fails
+        run: docker logout ${{ env.ARTIFACTORY_URL }}
