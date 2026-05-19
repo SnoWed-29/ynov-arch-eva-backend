@@ -98,26 +98,37 @@ jobs:
           cache-from: type=gha   # pulls from cache so this is fast (no real rebuild)
           cache-to: type=gha,mode=max
 
-      - name: Login to JFrog Artifactory
+      - name: Setup JFrog CLI
+        uses: jfrog/setup-jfrog-cli@v4
+        env:
+          JF_URL: https://${{ env.ARTIFACTORY_URL }}
+          JF_USER: ${{ secrets.ARTIFACTORY_USERNAME }}
+          JF_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+
+      - name: Docker Login to Artifactory
         run: |
           echo "${{ secrets.ARTIFACTORY_PASSWORD }}" | docker login ${{ env.ARTIFACTORY_URL }} \
             -u "${{ secrets.ARTIFACTORY_USERNAME }}" \
             --password-stdin
 
-      - name: Tag Image for Artifactory
+      - name: Tag and Push Image with JFrog CLI
         run: |
-          docker tag ${{ matrix.service }}:latest \
-            ${{ env.ARTIFACTORY_URL }}/${{ env.REPO_NAME }}/${{ matrix.service }}:${{ github.run_number }}
+          # Define image names
+          IMAGE_NAME="${{ env.ARTIFACTORY_URL }}/${{ env.REPO_NAME }}/${{ matrix.service }}:${{ github.run_number }}"
+          LATEST_NAME="${{ env.ARTIFACTORY_URL }}/${{ env.REPO_NAME }}/${{ matrix.service }}:latest"
 
-          # Also keep a :latest tag in Artifactory for easy reference
-          docker tag ${{ matrix.service }}:latest \
-            ${{ env.ARTIFACTORY_URL }}/${{ env.REPO_NAME }}/${{ matrix.service }}:latest
+          # Tag images
+          docker tag ${{ matrix.service }}:latest $IMAGE_NAME
+          docker tag ${{ matrix.service }}:latest $LATEST_NAME
 
-      - name: Push to Artifactory
+          # Push with JFrog CLI to collect Build Info
+          jf docker push $IMAGE_NAME ${{ env.REPO_NAME }} --build-name=${{ matrix.service }} --build-number=${{ github.run_number }}
+          jf docker push $LATEST_NAME ${{ env.REPO_NAME }} --build-name=${{ matrix.service }} --build-number=${{ github.run_number }}
+
+      - name: Publish Build Info
         run: |
-          docker push ${{ env.ARTIFACTORY_URL }}/${{ env.REPO_NAME }}/${{ matrix.service }}:${{ github.run_number }}
-          docker push ${{ env.ARTIFACTORY_URL }}/${{ env.REPO_NAME }}/${{ matrix.service }}:latest
+          jf rt build-publish ${{ matrix.service }} ${{ github.run_number }}
 
       - name: Logout from Artifactory
-        if: always()   # logout even if push fails
+        if: always()
         run: docker logout ${{ env.ARTIFACTORY_URL }}
